@@ -13,10 +13,7 @@ async fn main() -> anyhow::Result<()> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::LeaveAlternateScreen
-        );
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
         default_hook(info);
     }));
 
@@ -38,27 +35,26 @@ async fn main() -> anyhow::Result<()> {
                 sqlx::postgres::PgPoolOptions::new()
                     .max_connections(8)
                     .connect(&url),
-            ).await;
+            )
+            .await;
 
             match connect_result {
-                Ok(Ok(pool)) => {
-                    match sqlx::migrate!("../../migrations").run(&pool).await {
-                        Ok(()) => {
-                            tracing::info!("database connected and migrations applied");
-                            Some(pool)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "database migration failed — falling back to ephemeral mode"
-                            );
-                            startup_notice = Some(
+                Ok(Ok(pool)) => match sqlx::migrate!("../../migrations").run(&pool).await {
+                    Ok(()) => {
+                        tracing::info!("database connected and migrations applied");
+                        Some(pool)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "database migration failed — falling back to ephemeral mode"
+                        );
+                        startup_notice = Some(
                                 "提示：数据库迁移失败，已自动降级为临时模式（ephemeral）。本次会话数据不会持久化。".to_string()
                             );
-                            None
-                        }
+                        None
                     }
-                }
+                },
                 Ok(Err(e)) => {
                     tracing::warn!(
                         error = %e,
@@ -74,12 +70,10 @@ async fn main() -> anyhow::Result<()> {
                         timeout_secs = DB_CONNECT_TIMEOUT_SECS,
                         "database connect timed out — falling back to ephemeral mode"
                     );
-                    startup_notice = Some(
-                        format!(
-                            "提示：连接数据库超时（{}s），已自动降级为临时模式（ephemeral）。本次会话数据不会持久化。",
-                            DB_CONNECT_TIMEOUT_SECS
-                        )
-                    );
+                    startup_notice = Some(format!(
+                        "提示：连接数据库超时（{}s），已自动降级为临时模式（ephemeral）。本次会话数据不会持久化。",
+                        DB_CONNECT_TIMEOUT_SECS
+                    ));
                     None
                 }
             }
@@ -107,18 +101,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Optional weak model for tool gating (route/no-route and tool selection).
     // Configure via IRIS_LLM_LITE_MODEL; uses same API key/base URL.
-    let tool_gate_llm: Option<std::sync::Arc<dyn iris_llm::provider::LlmProvider>> =
+    let lite_llm: Option<std::sync::Arc<dyn iris_llm::provider::LlmProvider>> =
         iris_llm::http::from_env_with_model_var("IRIS_LLM_LITE_MODEL").map(|p| {
-            tracing::info!(name = p.name(), "tool-gate LLM initialized");
+            tracing::info!(name = p.name(), "lite LLM initialized");
             std::sync::Arc::new(p) as _
         });
-    if tool_gate_llm.is_none() {
+    if lite_llm.is_none() {
         tracing::warn!("IRIS_LLM_LITE_MODEL not set or invalid; tool routing will use main LLM");
     }
 
     // Create runtime (now returns 4-tuple with status_rx)
     let (mut runtime, event_tx, output_rx, status_rx) =
-        iris_core::runtime::Runtime::new(cfg, pool, llm, tool_gate_llm);
+        iris_core::runtime::Runtime::new(cfg, pool, llm, lite_llm);
     let token = runtime.token();
 
     // Runtime is !Send (tracing EnteredSpan), so run both futures on the same task.

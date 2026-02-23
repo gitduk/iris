@@ -2,17 +2,20 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use super::loop_control::{self, TickMode};
+use super::rest_cycle::RestCycle;
+use super::shutdown::ShutdownGuard;
 use crate::boot::guardian::BootGuardian;
 use crate::boot::safe_mode::SafeMode;
-use crate::cognition::arbitration::PressureState;
-use crate::cognition::{direct_response, tool_call};
-use crate::capability::{db as capability_db, lifecycle, process_manager::ProcessManager};
 use crate::capability::builtin::BuiltinRegistry;
 use crate::capability::process_manager::HealthEvent;
+use crate::capability::{db as capability_db, lifecycle, process_manager::ProcessManager};
 use crate::codegen::gap_generator;
+use crate::cognition::arbitration::PressureState;
+use crate::cognition::{direct_response, tool_call};
 use crate::config::IrisCfg;
-use crate::dialogue::context_version::ContextVersion;
 use crate::dialogue::commit_window::CommitWindow;
+use crate::dialogue::context_version::ContextVersion;
 use crate::dialogue::feedback;
 use crate::dialogue::interrupt::InterruptController;
 use crate::dialogue::topic_tracking::TopicTracker;
@@ -20,7 +23,7 @@ use crate::environment::hardware::HardwareSnapshot;
 use crate::environment::system::{CpuSampler, RamSnapshot};
 use crate::environment::watcher::EnvironmentWatcher;
 use crate::identity::affect::AffectActor;
-use crate::identity::{core_identity, narrative, self_model, introspection};
+use crate::identity::{core_identity, introspection, narrative, self_model};
 use crate::io::output::{OutputMessage, OutputReceiver, OutputSender};
 use crate::memory;
 use crate::memory::working::WorkingMemory;
@@ -33,9 +36,6 @@ use crate::types::{
     NarrativeEventType, RuntimeStatus, SensoryEvent,
 };
 use iris_llm::provider::LlmProvider;
-use super::loop_control::{self, TickMode};
-use super::rest_cycle::RestCycle;
-use super::shutdown::ShutdownGuard;
 
 /// Core runtime that drives the iris tick loop.
 pub struct Runtime {
@@ -53,7 +53,7 @@ pub struct Runtime {
     /// LLM provider for slow path + direct response (None if no LLM configured).
     llm: Option<Arc<dyn LlmProvider>>,
     /// Optional lightweight LLM used only to decide whether tool calls are needed.
-    tool_gate_llm: Option<Arc<dyn LlmProvider>>,
+    lite_llm: Option<Arc<dyn LlmProvider>>,
     /// In-process working memory.
     working_memory: WorkingMemory,
     /// Outbound response channel.
@@ -98,8 +98,13 @@ impl Runtime {
         cfg: Arc<IrisCfg>,
         pool: Option<sqlx::PgPool>,
         llm: Option<Arc<dyn LlmProvider>>,
-        tool_gate_llm: Option<Arc<dyn LlmProvider>>,
-    ) -> (Self, mpsc::Sender<SensoryEvent>, OutputReceiver, tokio::sync::watch::Receiver<RuntimeStatus>) {
+        lite_llm: Option<Arc<dyn LlmProvider>>,
+    ) -> (
+        Self,
+        mpsc::Sender<SensoryEvent>,
+        OutputReceiver,
+        tokio::sync::watch::Receiver<RuntimeStatus>,
+    ) {
         let shutdown = ShutdownGuard::new();
         let shutdown_token = shutdown.token();
         let working_memory_cap = cfg.working_memory_cap;
@@ -124,11 +129,8 @@ impl Runtime {
             mode: TickMode::Idle,
             pressure: PressureState::new(),
             llm,
-            tool_gate_llm,
-            working_memory: WorkingMemory::new(
-                working_memory_cap,
-                working_memory_ttl,
-            ),
+            lite_llm,
+            working_memory: WorkingMemory::new(working_memory_cap, working_memory_ttl),
             output_tx,
             affect,
             topics: TopicTracker::with_max(max_active_topics),
@@ -161,7 +163,9 @@ impl Runtime {
 
         // Load confirmed capabilities from DB
         if let Some(pool) = &self.pool {
-            match capability_db::fetch_by_state(pool, crate::types::CapabilityState::Confirmed).await {
+            match capability_db::fetch_by_state(pool, crate::types::CapabilityState::Confirmed)
+                .await
+            {
                 Ok(caps) => {
                     tracing::info!(count = caps.len(), "capabilities loaded from DB");
 
@@ -179,7 +183,12 @@ impl Runtime {
             }
 
             // Also spawn ActiveCandidate capabilities
-            match capability_db::fetch_by_state(pool, crate::types::CapabilityState::ActiveCandidate).await {
+            match capability_db::fetch_by_state(
+                pool,
+                crate::types::CapabilityState::ActiveCandidate,
+            )
+            .await
+            {
                 Ok(candidates) => {
                     for cap in &candidates {
                         if let Err(e) = self.process_manager.spawn(cap) {
@@ -272,7 +281,11 @@ impl Runtime {
             }
         }
 
-        self.process_manager.shutdown_all(std::time::Duration::from_secs(self.cfg.shutdown_timeout_secs)).await;
+        self.process_manager
+            .shutdown_all(std::time::Duration::from_secs(
+                self.cfg.shutdown_timeout_secs,
+            ))
+            .await;
         tracing::info!("iris runtime stopped");
     }
 
@@ -310,10 +323,8 @@ impl Runtime {
         let has_external_events = batch.has_external();
 
         // Step 4-6: Process dialogue events through fast/slow dual system
-        let all_events: Vec<GatedEvent> = batch.dialogue
-            .into_iter()
-            .chain(batch.internal)
-            .collect();
+        let all_events: Vec<GatedEvent> =
+            batch.dialogue.into_iter().chain(batch.internal).collect();
 
         // Interrupt: cancel previous reasoning if new external input arrives
         if has_external_events && self.interrupt.has_active_task() {
@@ -356,7 +367,9 @@ impl Runtime {
                 if fb != FeedbackType::Neutral
                     && let Some(pool) = &self.pool
                 {
-                    let request_type = self.topics.current_topic()
+                    let request_type = self
+                        .topics
+                        .current_topic()
                         .map(|_| "dialogue")
                         .unwrap_or("unknown");
                     if let Err(e) = feedback::record_preference(pool, request_type, fb).await {
@@ -503,7 +516,12 @@ impl Runtime {
 
     /// Execute capability invocation: DB lookup, state validation, spawn if needed, IPC invoke.
     #[allow(dead_code)]
-    async fn execute_capability_invocation(&mut self, event: &GatedEvent, cap_uuid: uuid::Uuid, self_context: &str) {
+    async fn execute_capability_invocation(
+        &mut self,
+        event: &GatedEvent,
+        cap_uuid: uuid::Uuid,
+        self_context: &str,
+    ) {
         // Built-in capability: execute in-process, then LLM-summarize the result
         if let Some(builtin) = self.builtin_registry.get(cap_uuid) {
             let builtin_name = builtin.name().to_string();
@@ -530,7 +548,8 @@ impl Runtime {
                 &tool_output,
                 is_error,
                 self_context,
-            ).await;
+            )
+            .await;
             return;
         }
 
@@ -549,10 +568,16 @@ impl Runtime {
                                     "capability should be retired"
                                 );
                             }
-                            self.send_response(&format!("[capability {}] quarantined, cannot invoke", record.name));
+                            self.send_response(&format!(
+                                "[capability {}] quarantined, cannot invoke",
+                                record.name
+                            ));
                         } else {
                             tracing::debug!(error = %e, capability = %record.name, "invalid capability state for invocation");
-                            self.send_response(&format!("[capability {}] state {:?} not invocable", record.name, record.state));
+                            self.send_response(&format!(
+                                "[capability {}] state {:?} not invocable",
+                                record.name, record.state
+                            ));
                         }
                         return;
                     }
@@ -568,8 +593,13 @@ impl Runtime {
                         && let Err(e) = self.process_manager.spawn(&record)
                     {
                         tracing::warn!(capability = %record.name, error = %e, "failed to spawn capability for invocation");
-                        self.send_response(&format!("[capability {}] spawn failed: {e}", record.name));
-                        if let Err(db_err) = capability_db::record_outcome(pool, cap_uuid, false).await {
+                        self.send_response(&format!(
+                            "[capability {}] spawn failed: {e}",
+                            record.name
+                        ));
+                        if let Err(db_err) =
+                            capability_db::record_outcome(pool, cap_uuid, false).await
+                        {
                             tracing::warn!(error = %db_err, "failed to record capability outcome");
                         }
                         return;
@@ -583,14 +613,22 @@ impl Runtime {
                         version: 1,
                     };
 
-                    let timeout = std::time::Duration::from_millis(record.manifest.resource_limits
-                        .get("timeout_ms")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(5000));
+                    let timeout = std::time::Duration::from_millis(
+                        record
+                            .manifest
+                            .resource_limits
+                            .get("timeout_ms")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(5000),
+                    );
 
                     tracing::info!(capability = %record.name, state = ?record.state, "invoking capability via IPC");
 
-                    match self.process_manager.invoke(cap_uuid, request, timeout).await {
+                    match self
+                        .process_manager
+                        .invoke(cap_uuid, request, timeout)
+                        .await
+                    {
                         Ok(resp) => {
                             let response = if let Some(err) = &resp.error {
                                 format!("[capability {}] error: {err}", record.name)
@@ -600,15 +638,23 @@ impl Runtime {
                                 format!("[capability {}] ok (no result)", record.name)
                             };
                             self.send_response(&response);
-                            if let Err(e) = capability_db::record_outcome(pool, cap_uuid, resp.error.is_none()).await {
+                            if let Err(e) =
+                                capability_db::record_outcome(pool, cap_uuid, resp.error.is_none())
+                                    .await
+                            {
                                 tracing::warn!(error = %e, "failed to record capability outcome");
                             }
                             self.store_response(event, response).await;
                         }
                         Err(e) => {
                             tracing::warn!(capability = %record.name, error = %e, "capability invocation failed");
-                            self.send_response(&format!("[capability {}] invoke error: {e}", record.name));
-                            if let Err(db_err) = capability_db::record_outcome(pool, cap_uuid, false).await {
+                            self.send_response(&format!(
+                                "[capability {}] invoke error: {e}",
+                                record.name
+                            ));
+                            if let Err(db_err) =
+                                capability_db::record_outcome(pool, cap_uuid, false).await
+                            {
                                 tracing::warn!(error = %db_err, "failed to record capability outcome");
                             }
                         }
@@ -725,7 +771,10 @@ impl Runtime {
 
             enum ToolPlan {
                 DirectResponse,
-                RoutedTool { name: String, input: serde_json::Value },
+                RoutedTool {
+                    name: String,
+                    input: serde_json::Value,
+                },
                 AgenticLoop,
             }
 
@@ -733,8 +782,8 @@ impl Runtime {
                 ToolPlan::DirectResponse
             } else {
                 // Prefer lightweight router when configured, otherwise fall back to main model.
-                let (router_llm, router_source) = if let Some(gate_llm) = &self.tool_gate_llm {
-                    (gate_llm.as_ref(), "lite")
+                let (router_llm, router_source) = if let Some(lite_llm) = &self.lite_llm {
+                    (lite_llm.as_ref(), "lite")
                 } else {
                     (llm.as_ref(), "main")
                 };
@@ -759,9 +808,14 @@ impl Runtime {
                                 // Low-confidence "no tool": let main model decide via agentic loop.
                                 ToolPlan::AgenticLoop
                             }
-                        } else if decision.is_valid && decision.confidence >= TOOL_ROUTE_CONFIDENCE_THRESHOLD {
+                        } else if decision.is_valid
+                            && decision.confidence >= TOOL_ROUTE_CONFIDENCE_THRESHOLD
+                        {
                             if let Some(name) = decision.tool_name {
-                                ToolPlan::RoutedTool { name, input: decision.input }
+                                ToolPlan::RoutedTool {
+                                    name,
+                                    input: decision.input,
+                                }
                             } else {
                                 ToolPlan::AgenticLoop
                             }
@@ -779,7 +833,8 @@ impl Runtime {
 
             match plan {
                 ToolPlan::RoutedTool { name, input } => {
-                    match tool_call::execute_named_tool(&self.builtin_registry, &name, &input).await {
+                    match tool_call::execute_named_tool(&self.builtin_registry, &name, &input).await
+                    {
                         Ok(result) => {
                             self.execute_builtin_with_llm_summary(
                                 event,
@@ -787,7 +842,8 @@ impl Runtime {
                                 &result,
                                 false,
                                 self_context,
-                            ).await;
+                            )
+                            .await;
                         }
                         Err(err) => {
                             self.affect.on_error();
@@ -797,7 +853,8 @@ impl Runtime {
                                 &err,
                                 true,
                                 self_context,
-                            ).await;
+                            )
+                            .await;
                         }
                     }
                 }
@@ -808,9 +865,14 @@ impl Runtime {
                         messages,
                         tools,
                         &self.builtin_registry,
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(response) => {
-                            tracing::info!(response_len = response.len(), "agentic loop response generated");
+                            tracing::info!(
+                                response_len = response.len(),
+                                "agentic loop response generated"
+                            );
                             self.send_response(&response);
                             self.store_response(event, response).await;
                         }
@@ -822,9 +884,14 @@ impl Runtime {
                     }
                 }
                 ToolPlan::DirectResponse => {
-                    match direct_response::generate(event, llm.as_ref(), &context, self_context).await {
+                    match direct_response::generate(event, llm.as_ref(), &context, self_context)
+                        .await
+                    {
                         Ok(response) => {
-                            tracing::info!(response_len = response.len(), "direct response generated (tool route: no tools)");
+                            tracing::info!(
+                                response_len = response.len(),
+                                "direct response generated (tool route: no tools)"
+                            );
                             self.send_response(&response);
                             self.store_response(event, response).await;
                         }
@@ -895,7 +962,8 @@ impl Runtime {
             let mut context: Vec<&ContextEntry> = working.to_vec();
             context.push(&tool_entry);
 
-            let llm_result = direct_response::generate(event, llm.as_ref(), &context, self_context).await;
+            let llm_result =
+                direct_response::generate(event, llm.as_ref(), &context, self_context).await;
 
             // Persist normalized observation to working memory so it survives even if LLM summary is poor
             // (must happen after generate() to avoid borrow conflict on working_memory)
@@ -903,7 +971,10 @@ impl Runtime {
 
             match llm_result {
                 Ok(response) => {
-                    tracing::info!(response_len = response.len(), "builtin LLM summary generated");
+                    tracing::info!(
+                        response_len = response.len(),
+                        "builtin LLM summary generated"
+                    );
                     self.send_response(&response);
                     self.store_response(event, response).await;
                 }
@@ -928,8 +999,16 @@ impl Runtime {
 
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(tool_output) {
                 let code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-                let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim();
-                let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
+                let stdout = v
+                    .get("stdout")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let stderr = v
+                    .get("stderr")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim();
 
                 let out = if stdout.is_empty() { "(empty)" } else { stdout };
                 let err = if stderr.is_empty() { "(empty)" } else { stderr };
@@ -956,8 +1035,16 @@ impl Runtime {
 
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(tool_output) {
                 let code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-                let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim();
-                let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
+                let stdout = v
+                    .get("stdout")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let stderr = v
+                    .get("stderr")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim();
 
                 if code == 0 {
                     if stdout.is_empty() && stderr.is_empty() {
@@ -970,12 +1057,18 @@ impl Runtime {
                 }
 
                 let brief = if !stderr.is_empty() { stderr } else { stdout };
-                return format!("执行命令失败（exit code {code}）：{}", Self::short_text(brief, 240));
+                return format!(
+                    "执行命令失败（exit code {code}）：{}",
+                    Self::short_text(brief, 240)
+                );
             }
         }
 
         if is_error {
-            format!("执行 {tool_name} 时失败：{}", Self::short_text(tool_output, 180))
+            format!(
+                "执行 {tool_name} 时失败：{}",
+                Self::short_text(tool_output, 180)
+            )
         } else {
             format!("{tool_name} 已执行完成。")
         }
@@ -992,7 +1085,11 @@ impl Runtime {
 
     /// Send a response to the output channel, logging if full.
     fn send_response(&self, content: &str) {
-        if self.output_tx.try_send(OutputMessage::complete(content.to_owned())).is_err() {
+        if self
+            .output_tx
+            .try_send(OutputMessage::complete(content.to_owned()))
+            .is_err()
+        {
             tracing::warn!("output channel full, response dropped");
         }
     }
@@ -1055,7 +1152,10 @@ impl Runtime {
 
         if lifecycle::should_retire(count) {
             // Retire the capability
-            if let Err(e) = capability_db::update_state(pool, cap_id, crate::types::CapabilityState::Retired).await {
+            if let Err(e) =
+                capability_db::update_state(pool, cap_id, crate::types::CapabilityState::Retired)
+                    .await
+            {
                 tracing::warn!(error = %e, "failed to retire capability");
             } else {
                 tracing::info!(capability_id = %cap_id, "capability retired after repeated crashes");
@@ -1070,7 +1170,13 @@ impl Runtime {
             let _ = narrative::record(pool, &evt).await;
         } else {
             // Quarantine
-            if let Err(e) = capability_db::update_state(pool, cap_id, crate::types::CapabilityState::Quarantined).await {
+            if let Err(e) = capability_db::update_state(
+                pool,
+                cap_id,
+                crate::types::CapabilityState::Quarantined,
+            )
+            .await
+            {
                 tracing::warn!(error = %e, "failed to quarantine capability");
             }
 
@@ -1108,13 +1214,19 @@ impl Runtime {
     /// Confirm an ActiveCandidate if it has been running long enough.
     async fn maybe_confirm_candidate(&mut self, cap_id: uuid::Uuid) {
         let observe_dur = std::time::Duration::from_secs(self.cfg.candidate_observe_min_secs);
-        if !self.process_manager.has_been_running_for(cap_id, observe_dur) {
+        if !self
+            .process_manager
+            .has_been_running_for(cap_id, observe_dur)
+        {
             return;
         }
 
         let Some(pool) = &self.pool else { return };
 
-        if let Err(e) = capability_db::update_state(pool, cap_id, crate::types::CapabilityState::Confirmed).await {
+        if let Err(e) =
+            capability_db::update_state(pool, cap_id, crate::types::CapabilityState::Confirmed)
+                .await
+        {
             tracing::warn!(error = %e, "failed to confirm candidate");
             return;
         }
