@@ -371,21 +371,82 @@ impl HttpProvider {
     }
 }
 
-/// Build an LlmProvider from environment variables.
-/// Reads `<model_env_key>`, `IRIS_LLM_API_KEY`, optionally `IRIS_LLM_BASE_URL`.
-/// Returns `None` if model or key is not set.
-pub fn from_env_with_model_var(model_env_key: &str) -> Option<HttpProvider> {
-    let model = std::env::var(model_env_key).ok()?;
-    let api_key = std::env::var("IRIS_LLM_API_KEY").ok()?;
-    let base_url = std::env::var("IRIS_LLM_BASE_URL").ok();
+/// Resolve the main model name from environment variables.
+///
+/// Checks: `CLAUDE_MODEL` > `OPENAI_MODEL` > `GEMINI_MODEL` > `DEEPSEEK_MODEL`.
+fn resolve_model() -> Option<String> {
+    const MODEL_VARS: &[&str] = &[
+        "CLAUDE_MODEL",
+        "OPENAI_MODEL",
+        "GEMINI_MODEL",
+        "DEEPSEEK_MODEL",
+    ];
+    MODEL_VARS.iter().find_map(|v| std::env::var(v).ok())
+}
+
+/// Resolve API key from provider-specific env var based on model name.
+fn resolve_api_key(model: &str) -> Option<String> {
+    let var = match ProviderKind::from_model(model) {
+        ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+        ProviderKind::OpenAi => "OPENAI_API_KEY",
+        ProviderKind::Google => "GEMINI_API_KEY",
+        ProviderKind::DeepSeek => "DEEPSEEK_API_KEY",
+        ProviderKind::Unknown => return None,
+    };
+    std::env::var(var).ok()
+}
+
+/// Resolve base URL from provider-specific env var based on model name.
+/// Returns `None` when not set (provider default will be used).
+fn resolve_base_url(model: &str) -> Option<String> {
+    let var = match ProviderKind::from_model(model) {
+        ProviderKind::Anthropic => "ANTHROPIC_BASE_URL",
+        ProviderKind::OpenAi => "OPENAI_BASE_URL",
+        ProviderKind::Google => "GEMINI_BASE_URL",
+        ProviderKind::DeepSeek => "DEEPSEEK_BASE_URL",
+        ProviderKind::Unknown => return None,
+    };
+    std::env::var(var).ok()
+}
+
+/// Resolve the lite model name from environment variables.
+///
+/// Checks: `CLAUDE_LITE_MODEL` > `OPENAI_LITE_MODEL` > `GEMINI_LITE_MODEL` > `DEEPSEEK_LITE_MODEL`.
+fn resolve_lite_model() -> Option<String> {
+    const LITE_VARS: &[&str] = &[
+        "CLAUDE_LITE_MODEL",
+        "OPENAI_LITE_MODEL",
+        "GEMINI_LITE_MODEL",
+        "DEEPSEEK_LITE_MODEL",
+    ];
+    LITE_VARS.iter().find_map(|v| std::env::var(v).ok())
+}
+
+/// Build the main LlmProvider from environment variables.
+///
+/// Model: `CLAUDE_MODEL` > `OPENAI_MODEL` > `GEMINI_MODEL` > `DEEPSEEK_MODEL`.
+/// API key / base URL resolved from provider-specific vars
+/// (e.g. `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`).
+///
+/// Returns `None` if no model or matching key is found.
+pub fn from_env() -> Option<HttpProvider> {
+    let model = resolve_model()?;
+    let api_key = resolve_api_key(&model)?;
+    let base_url = resolve_base_url(&model);
     Some(HttpProvider::new(model, api_key, base_url))
 }
 
-/// Build an LlmProvider from the default environment variables.
-/// Reads `IRIS_LLM_MODEL`, `IRIS_LLM_API_KEY`, optionally `IRIS_LLM_BASE_URL`.
-/// Returns `None` if model or key is not set.
-pub fn from_env() -> Option<HttpProvider> {
-    from_env_with_model_var("IRIS_LLM_MODEL")
+/// Build the lite LlmProvider from environment variables.
+///
+/// Model: `CLAUDE_LITE_MODEL` > `OPENAI_LITE_MODEL` > `GEMINI_LITE_MODEL` > `DEEPSEEK_LITE_MODEL`.
+/// API key / base URL reuse the same provider-specific vars as the main provider.
+///
+/// Returns `None` if no lite model or matching key is found.
+pub fn lite_from_env() -> Option<HttpProvider> {
+    let model = resolve_lite_model()?;
+    let api_key = resolve_api_key(&model)?;
+    let base_url = resolve_base_url(&model);
+    Some(HttpProvider::new(model, api_key, base_url))
 }
 
 #[cfg(test)]
@@ -460,5 +521,137 @@ mod tests {
             Some("https://my-proxy.com/v1".into()),
         );
         assert_eq!(p.endpoint(), "https://my-proxy.com/v1/chat/completions");
+    }
+
+    // ── env var resolution tests ──
+    // These mutate process env so must run serially (cargo test -- --test-threads=1
+    // or accept that they may interfere with each other in parallel).
+
+    /// Helper: clear all LLM-related env vars to isolate each test.
+    ///
+    /// SAFETY: tests that call this must run single-threaded (`--test-threads=1`).
+    fn clear_llm_env() {
+        for var in &[
+            "CLAUDE_MODEL", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+            "CLAUDE_LITE_MODEL",
+            "OPENAI_MODEL", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+            "OPENAI_LITE_MODEL",
+            "GEMINI_MODEL", "GEMINI_API_KEY", "GEMINI_BASE_URL",
+            "GEMINI_LITE_MODEL",
+            "DEEPSEEK_MODEL", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_LITE_MODEL",
+        ] {
+            unsafe { std::env::remove_var(var); }
+        }
+    }
+
+    /// SAFETY: tests run single-threaded via `--test-threads=1`.
+    unsafe fn set(key: &str, val: &str) {
+        unsafe { std::env::set_var(key, val); }
+    }
+
+    #[test]
+    fn resolve_model_claude_priority() {
+        clear_llm_env();
+        unsafe { set("CLAUDE_MODEL", "claude-sonnet-4-6"); }
+        unsafe { set("OPENAI_MODEL", "gpt-4o"); }
+        assert_eq!(resolve_model().unwrap(), "claude-sonnet-4-6");
+        clear_llm_env();
+    }
+
+    #[test]
+    fn resolve_model_falls_back_to_openai() {
+        clear_llm_env();
+        unsafe { set("OPENAI_MODEL", "gpt-4o"); }
+        assert_eq!(resolve_model().unwrap(), "gpt-4o");
+        clear_llm_env();
+    }
+
+    #[test]
+    fn resolve_model_none_when_empty() {
+        clear_llm_env();
+        assert!(resolve_model().is_none());
+    }
+
+    #[test]
+    fn resolve_api_key_provider_match() {
+        clear_llm_env();
+        unsafe { set("ANTHROPIC_API_KEY", "ant-key"); }
+        assert_eq!(resolve_api_key("claude-sonnet-4-6").unwrap(), "ant-key");
+        clear_llm_env();
+    }
+
+    #[test]
+    fn resolve_api_key_unknown_model_no_fallback() {
+        clear_llm_env();
+        assert!(resolve_api_key("llama-3").is_none());
+        clear_llm_env();
+    }
+
+    #[test]
+    fn resolve_base_url_provider_fallback() {
+        clear_llm_env();
+        unsafe { set("ANTHROPIC_BASE_URL", "https://proxy.example.com"); }
+        assert_eq!(resolve_base_url("claude-opus-4-6").unwrap(), "https://proxy.example.com");
+        clear_llm_env();
+    }
+
+    #[test]
+    fn from_env_with_anthropic_vars() {
+        clear_llm_env();
+        unsafe { set("CLAUDE_MODEL", "claude-opus-4-6"); }
+        unsafe { set("ANTHROPIC_API_KEY", "sk-ant-test"); }
+        unsafe { set("ANTHROPIC_BASE_URL", "https://proxy.example.com"); }
+        let p = from_env().expect("should resolve from CLAUDE_MODEL + ANTHROPIC_API_KEY");
+        assert_eq!(p.model, "claude-opus-4-6");
+        assert_eq!(p.api_key, "sk-ant-test");
+        assert_eq!(p.base_url, "https://proxy.example.com");
+        assert_eq!(p.kind, ProviderKind::Anthropic);
+        clear_llm_env();
+    }
+
+    #[test]
+    fn from_env_with_openai_vars() {
+        clear_llm_env();
+        unsafe { set("OPENAI_MODEL", "gpt-4o"); }
+        unsafe { set("OPENAI_API_KEY", "sk-openai-test"); }
+        let p = from_env().expect("should resolve from OPENAI_MODEL + OPENAI_API_KEY");
+        assert_eq!(p.model, "gpt-4o");
+        assert_eq!(p.api_key, "sk-openai-test");
+        assert_eq!(p.kind, ProviderKind::OpenAi);
+        clear_llm_env();
+    }
+
+    #[test]
+    fn from_env_none_without_key() {
+        clear_llm_env();
+        unsafe { set("CLAUDE_MODEL", "claude-opus-4-6"); }
+        // No API key set at all
+        assert!(from_env().is_none());
+        clear_llm_env();
+    }
+
+    #[test]
+    fn lite_model_claude_lite_model_var() {
+        clear_llm_env();
+        unsafe { set("CLAUDE_LITE_MODEL", "claude-haiku-4-5-20251001"); }
+        unsafe { set("ANTHROPIC_API_KEY", "sk-ant-lite"); }
+        let p = lite_from_env()
+            .expect("should resolve from CLAUDE_LITE_MODEL + ANTHROPIC_API_KEY");
+        assert_eq!(p.model, "claude-haiku-4-5-20251001");
+        assert_eq!(p.api_key, "sk-ant-lite");
+        clear_llm_env();
+    }
+
+    #[test]
+    fn lite_model_openai_lite_model_var() {
+        clear_llm_env();
+        unsafe { set("OPENAI_LITE_MODEL", "gpt-4o-mini"); }
+        unsafe { set("OPENAI_API_KEY", "sk-openai-lite"); }
+        let p = lite_from_env()
+            .expect("should resolve from OPENAI_LITE_MODEL + OPENAI_API_KEY");
+        assert_eq!(p.model, "gpt-4o-mini");
+        assert_eq!(p.api_key, "sk-openai-lite");
+        clear_llm_env();
     }
 }

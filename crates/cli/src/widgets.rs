@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::Position;
+use ratatui::layout::{Constraint, Direction, Layout, Position};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -65,7 +65,22 @@ fn convert_color(c: ratatui_core::style::Color) -> Color {
 const SPINNER: &[&str] = &["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
 
 pub fn draw(f: &mut Frame, app: &App) {
-    draw_chat(f, app, f.area());
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(f.area());
+
+    draw_chat(f, app, chunks[0]);
+    draw_status(f, app, chunks[1]);
+}
+
+fn draw_status(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let a = &app.status.affect;
+    let text = format!(" {}  |  energy {:.0}%  valence {:.0}%  arousal {:.0}%",
+        app.status.mode, a.energy * 100.0, a.valence * 100.0, a.arousal * 100.0);
+
+    let para = Paragraph::new(Line::from(Span::styled(text, Style::default().fg(Color::DarkGray))));
+    f.render_widget(para, area);
 }
 
 fn draw_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {

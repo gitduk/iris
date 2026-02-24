@@ -100,14 +100,14 @@ async fn main() -> anyhow::Result<()> {
         });
 
     // Optional weak model for tool gating (route/no-route and tool selection).
-    // Configure via IRIS_LLM_LITE_MODEL; uses same API key/base URL.
+    // Checks CLAUDE_LITE_MODEL > OPENAI_LITE_MODEL > GEMINI_LITE_MODEL > DEEPSEEK_LITE_MODEL.
     let lite_llm: Option<std::sync::Arc<dyn iris_llm::provider::LlmProvider>> =
-        iris_llm::http::from_env_with_model_var("IRIS_LLM_LITE_MODEL").map(|p| {
+        iris_llm::http::lite_from_env().map(|p| {
             tracing::info!(name = p.name(), "lite LLM initialized");
             std::sync::Arc::new(p) as _
         });
     if lite_llm.is_none() {
-        tracing::warn!("IRIS_LLM_LITE_MODEL not set or invalid; tool routing will use main LLM");
+        tracing::warn!("no lite model configured; tool routing will use main LLM");
     }
 
     // Create runtime (now returns 4-tuple with status_rx)
