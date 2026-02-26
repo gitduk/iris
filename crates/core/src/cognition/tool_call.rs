@@ -48,8 +48,7 @@ pub async fn route_tool_call(
         });
     }
 
-    let tools_json = serde_json::to_string_pretty(tools)
-        .unwrap_or_else(|_| "[]".to_string());
+    let tools_json = serde_json::to_string_pretty(tools).unwrap_or_else(|_| "[]".to_string());
 
     let request = CompletionRequest {
         messages: vec![
@@ -206,7 +205,10 @@ fn parse_router_json(raw: &str) -> Result<serde_json::Value, String> {
 
     let candidate = if trimmed.starts_with("```") {
         let lines: Vec<&str> = trimmed.lines().collect();
-        let start = if lines.first().is_some_and(|l| l.trim_start().starts_with("```")) {
+        let start = if lines
+            .first()
+            .is_some_and(|l| l.trim_start().starts_with("```"))
+        {
             1
         } else {
             0
@@ -215,6 +217,7 @@ fn parse_router_json(raw: &str) -> Result<serde_json::Value, String> {
             .iter()
             .rposition(|l| l.trim_start().starts_with("```"))
             .unwrap_or(lines.len());
+        let end = end.max(start);
         lines[start..end].join("\n")
     } else if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
         trimmed[start..=end].to_string()
@@ -297,12 +300,10 @@ async fn execute_tool(
     tool_name: &str,
     input: &serde_json::Value,
 ) -> Result<String, String> {
-    let cap = registry
-        .get_by_name(tool_name)
-        .ok_or_else(|| {
-            let available = registry.list_names().join(", ");
-            format!("Unknown tool '{tool_name}'. Available: {available}")
-        })?;
+    let cap = registry.get_by_name(tool_name).ok_or_else(|| {
+        let available = registry.list_names().join(", ");
+        format!("Unknown tool '{tool_name}'. Available: {available}")
+    })?;
 
     let request = CapabilityRequest {
         id: uuid::Uuid::new_v4(),
@@ -367,13 +368,17 @@ pub async fn run_agentic_loop(
                 ));
 
                 // Collect tool_use blocks and execute them
-                let tool_uses: Vec<_> = response.content_blocks.iter().filter_map(|b| {
-                    if let ContentBlock::ToolUse { id, name, input } = b {
-                        Some((id.clone(), name.clone(), input.clone()))
-                    } else {
-                        None
-                    }
-                }).collect();
+                let tool_uses: Vec<_> = response
+                    .content_blocks
+                    .iter()
+                    .filter_map(|b| {
+                        if let ContentBlock::ToolUse { id, name, input } = b {
+                            Some((id.clone(), name.clone(), input.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
 
                 let mut result_blocks = Vec::new();
                 for (id, name, input) in &tool_uses {
@@ -424,7 +429,9 @@ mod tests {
 
     #[tokio::test]
     async fn router_returns_valid_tool_decision() {
-        let provider = MockProvider::new(r#"{"use_tool":true,"tool_name":"run_bash","input":{"command":"echo hi"},"confidence":0.91}"#);
+        let provider = MockProvider::new(
+            r#"{"use_tool":true,"tool_name":"run_bash","input":{"command":"echo hi"},"confidence":0.91}"#,
+        );
         let tools = vec![ToolDefinition {
             name: "run_bash".into(),
             description: "Execute shell command".into(),
@@ -435,7 +442,9 @@ mod tests {
             }),
         }];
 
-        let decision = route_tool_call(&provider, "run echo hi", &tools).await.unwrap();
+        let decision = route_tool_call(&provider, "run echo hi", &tools)
+            .await
+            .unwrap();
         assert!(decision.use_tool);
         assert_eq!(decision.tool_name.as_deref(), Some("run_bash"));
         assert!(decision.is_valid);
@@ -444,7 +453,9 @@ mod tests {
 
     #[tokio::test]
     async fn router_invalid_when_required_arg_missing() {
-        let provider = MockProvider::new(r#"{"use_tool":true,"tool_name":"run_bash","input":{},"confidence":0.95}"#);
+        let provider = MockProvider::new(
+            r#"{"use_tool":true,"tool_name":"run_bash","input":{},"confidence":0.95}"#,
+        );
         let tools = vec![ToolDefinition {
             name: "run_bash".into(),
             description: "Execute shell command".into(),
@@ -455,14 +466,18 @@ mod tests {
             }),
         }];
 
-        let decision = route_tool_call(&provider, "run echo hi", &tools).await.unwrap();
+        let decision = route_tool_call(&provider, "run echo hi", &tools)
+            .await
+            .unwrap();
         assert!(decision.use_tool);
         assert!(!decision.is_valid);
     }
 
     #[tokio::test]
     async fn router_invalid_when_tool_unknown() {
-        let provider = MockProvider::new(r#"{"use_tool":true,"tool_name":"unknown_tool","input":{},"confidence":0.9}"#);
+        let provider = MockProvider::new(
+            r#"{"use_tool":true,"tool_name":"unknown_tool","input":{},"confidence":0.9}"#,
+        );
         let tools = vec![ToolDefinition {
             name: "run_bash".into(),
             description: "Execute shell command".into(),
@@ -473,7 +488,9 @@ mod tests {
             }),
         }];
 
-        let decision = route_tool_call(&provider, "run echo hi", &tools).await.unwrap();
+        let decision = route_tool_call(&provider, "run echo hi", &tools)
+            .await
+            .unwrap();
         assert!(decision.use_tool);
         assert!(!decision.is_valid);
     }
@@ -529,35 +546,45 @@ mod tests {
             content_blocks: vec![],
         }];
 
-        let result = run_agentic_loop(
-            &provider, messages, vec![], &registry,
-        ).await.unwrap();
+        let result = run_agentic_loop(&provider, messages, vec![], &registry)
+            .await
+            .unwrap();
         assert_eq!(result, "just a normal answer");
     }
 
     #[tokio::test]
     async fn agentic_loop_with_tool_use() {
         // First call returns ToolUse, second call returns EndTurn
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use iris_llm::provider::{CompletionResponse, LlmError};
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct TwoStepProvider {
             call_count: AtomicUsize,
         }
 
         impl LlmProvider for TwoStepProvider {
-            fn name(&self) -> &str { "two-step" }
+            fn name(&self) -> &str {
+                "two-step"
+            }
 
             fn complete(
                 &self,
                 _request: CompletionRequest,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CompletionResponse, LlmError>> + Send + '_>> {
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<CompletionResponse, LlmError>>
+                        + Send
+                        + '_,
+                >,
+            > {
                 let n = self.call_count.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move {
                     if n == 0 {
                         // First call: tool use
                         let blocks = vec![
-                            ContentBlock::Text { text: "Let me check.".into() },
+                            ContentBlock::Text {
+                                text: "Let me check.".into(),
+                            },
                             ContentBlock::ToolUse {
                                 id: "tu_1".into(),
                                 name: "run_bash".into(),
@@ -575,7 +602,9 @@ mod tests {
                         // Second call: final answer
                         Ok(CompletionResponse {
                             content: "The command output: hello".into(),
-                            content_blocks: vec![ContentBlock::Text { text: "The command output: hello".into() }],
+                            content_blocks: vec![ContentBlock::Text {
+                                text: "The command output: hello".into(),
+                            }],
                             stop_reason: StopReason::EndTurn,
                             input_tokens: 10,
                             output_tokens: 20,
@@ -585,7 +614,9 @@ mod tests {
             }
         }
 
-        let provider = TwoStepProvider { call_count: AtomicUsize::new(0) };
+        let provider = TwoStepProvider {
+            call_count: AtomicUsize::new(0),
+        };
         let registry = BuiltinRegistry::new();
 
         let tools = registry.tool_definitions();
@@ -595,9 +626,9 @@ mod tests {
             content_blocks: vec![],
         }];
 
-        let result = run_agentic_loop(
-            &provider, messages, tools, &registry,
-        ).await.unwrap();
+        let result = run_agentic_loop(&provider, messages, tools, &registry)
+            .await
+            .unwrap();
         assert_eq!(result, "The command output: hello");
         assert_eq!(provider.call_count.load(Ordering::SeqCst), 2);
     }
