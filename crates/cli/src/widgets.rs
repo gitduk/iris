@@ -62,7 +62,7 @@ fn convert_color(c: ratatui_core::style::Color) -> Color {
     }
 }
 
-const SPINNER: &[&str] = &["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -76,10 +76,18 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn draw_status(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let a = &app.status.affect;
-    let text = format!(" {}  |  energy {:.0}%  valence {:.0}%  arousal {:.0}%",
-        app.status.mode, a.energy * 100.0, a.valence * 100.0, a.arousal * 100.0);
+    let text = format!(
+        " {}  |  energy {:.0}%  valence {:.0}%  arousal {:.0}%",
+        app.status.mode,
+        a.energy * 100.0,
+        a.valence * 100.0,
+        a.arousal * 100.0
+    );
 
-    let para = Paragraph::new(Line::from(Span::styled(text, Style::default().fg(Color::DarkGray))));
+    let para = Paragraph::new(Line::from(Span::styled(
+        text,
+        Style::default().fg(Color::DarkGray),
+    )));
     f.render_widget(para, area);
 }
 
@@ -91,19 +99,17 @@ fn draw_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             lines.push(Line::default());
         }
         if msg.role == "You" {
-            lines.push(Line::from(vec![
-                Span::raw("> "),
-                Span::raw(&msg.content),
-            ]));
+            lines.push(Line::from(vec![Span::raw("> "), Span::raw(&msg.content)]));
         } else {
             lines.extend(md_to_lines(&msg.content));
         }
     }
     if app.thinking {
         let frame = SPINNER[app.anim_frame % SPINNER.len()];
-        lines.push(Line::from(
-            Span::styled(format!("{frame} thinking..."), Style::default().dim()),
-        ));
+        lines.push(Line::from(Span::styled(
+            format!("{frame} thinking..."),
+            Style::default().dim(),
+        )));
     }
 
     // Current input line
@@ -120,9 +126,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let inner_w = area.width.saturating_sub(2) as usize;
 
     // Count wrapped visual rows for all lines
-    let wrapped_total: u16 = lines.iter()
-        .map(|l| wrapped_line_count(l, inner_w))
-        .sum();
+    let wrapped_total: u16 = lines.iter().map(|l| wrapped_line_count(l, inner_w)).sum();
     let visible = area.height.saturating_sub(2); // top/bottom border
     let scroll = wrapped_total.saturating_sub(visible);
     let scroll = scroll.saturating_sub(app.scroll_offset);
@@ -137,12 +141,20 @@ fn draw_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     // Cursor position accounting for wrap
     let before_cursor = &app.input[..app.cursor];
     let cursor_visual_w = input_prefix.width() + before_cursor.width();
-    let cursor_row_in_input = if inner_w > 0 { cursor_visual_w / inner_w } else { 0 };
-    let cursor_col_in_input = if inner_w > 0 { cursor_visual_w % inner_w } else { 0 };
+    let cursor_row_in_input = if inner_w > 0 {
+        cursor_visual_w / inner_w
+    } else {
+        0
+    };
+    let cursor_col_in_input = if inner_w > 0 {
+        cursor_visual_w % inner_w
+    } else {
+        0
+    };
 
     // Row of the input line's first wrapped row (after scroll)
-    let input_first_row = wrapped_total
-        .saturating_sub(wrapped_line_count_raw(input_prefix.width() + app.input.width(), inner_w));
+    let input_line_str = format!("{}{}", input_prefix, app.input);
+    let input_first_row = wrapped_total.saturating_sub(greedy_wrap_rows(&input_line_str, inner_w));
     let abs_row = input_first_row + cursor_row_in_input as u16;
     let vis_row = abs_row.saturating_sub(scroll);
 
@@ -153,20 +165,36 @@ fn draw_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 /// How many visual rows a Line occupies when wrapped to `width` columns.
+/// Simulates ratatui's greedy word-wrap by advancing char-by-char.
 fn wrapped_line_count(line: &Line, width: usize) -> u16 {
     if width == 0 {
         return 1;
     }
     let full: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     full.split('\n')
-        .map(|sub| wrapped_line_count_raw(sub.width(), width))
+        .map(|sub| greedy_wrap_rows(sub, width))
         .sum()
 }
 
-fn wrapped_line_count_raw(char_width: usize, term_width: usize) -> u16 {
-    if term_width == 0 || char_width == 0 {
+/// Count visual rows for a single unwrapped string segment using greedy wrap.
+/// Each character is placed on the current row; if it doesn't fit, a new row starts.
+fn greedy_wrap_rows(s: &str, width: usize) -> u16 {
+    if width == 0 {
         return 1;
     }
-    char_width.div_ceil(term_width) as u16
+    let mut rows: u16 = 1;
+    let mut col: usize = 0;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cw == 0 {
+            continue;
+        }
+        if col + cw > width {
+            rows += 1;
+            col = cw;
+        } else {
+            col += cw;
+        }
+    }
+    rows
 }
-
