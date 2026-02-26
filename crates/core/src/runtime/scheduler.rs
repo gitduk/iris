@@ -12,7 +12,7 @@ use crate::capability::process_manager::HealthEvent;
 use crate::capability::{db as capability_db, lifecycle, process_manager::ProcessManager};
 use crate::codegen::gap_generator;
 use crate::cognition::arbitration::PressureState;
-use crate::cognition::{direct_response, tool_call};
+use crate::cognition::{response, tool_call};
 use crate::config::IrisCfg;
 use crate::dialogue::commit_window::CommitWindow;
 use crate::dialogue::context_version::ContextVersion;
@@ -859,7 +859,7 @@ impl Runtime {
                     }
                 }
                 ToolPlan::AgenticLoop => {
-                    let messages = direct_response::build_messages(event, &context, self_context);
+                    let messages = response::build_messages(event, &context, self_context);
                     match tool_call::run_agentic_loop(
                         llm.as_ref(),
                         messages,
@@ -884,7 +884,7 @@ impl Runtime {
                     }
                 }
                 ToolPlan::DirectResponse => {
-                    match direct_response::generate(event, llm.as_ref(), &context, self_context)
+                    match response::generate(event, llm.as_ref(), &context, self_context)
                         .await
                     {
                         Ok(response) => {
@@ -963,7 +963,7 @@ impl Runtime {
             context.push(&tool_entry);
 
             let llm_result =
-                direct_response::generate(event, llm.as_ref(), &context, self_context).await;
+                response::generate(event, llm.as_ref(), &context, self_context).await;
 
             // Persist normalized observation to working memory so it survives even if LLM summary is poor
             // (must happen after generate() to avoid borrow conflict on working_memory)
