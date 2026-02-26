@@ -14,7 +14,7 @@ CLAUDE_MODEL=<model> ANTHROPIC_API_KEY=<key> cargo run
 # Run (full mode with persistent memory)
 DATABASE_URL=postgres://... CLAUDE_MODEL=<model> ANTHROPIC_API_KEY=<key> cargo run
 
-# Run all tests (197 total: 161 core unit + 24 integration + 12 llm)
+# Run all tests (208 total: 161 core unit + 24 integration + 23 llm)
 cargo test
 
 # Run a single test by name
@@ -303,12 +303,10 @@ iris/
           rest_cycle.rs      # RestMode 休眠周期管理（待实现）
         dialogue/
           topic_tracking.rs / commit_window.rs / feedback.rs / interrupt.rs
-          stream.rs          # 流式用户输入接入（待实现）
-          context_version.rs # context_version 管理（待实现）
+          context_version.rs # context_version 管理
         sensory/
           gating.rs          # 规则过滤 + 四维打分
           salience.rs        # 显著性评分计算
-          transduction.rs    # 原始信号 → SensoryEvent 转换（待实现）
         thalamus/
           router.rs          # 路由分发：TextDialogue / InternalSignal / SystemEvent
         cognition/
@@ -316,7 +314,6 @@ iris/
           direct_response.rs # 无工具时 LLM 直接响应（主链路）
           fast_path.rs / slow_path.rs / arbitration.rs  # 历史模块，当前未接入 runtime
           perception.rs      # PerceptFeature 提取（待实现）
-          association.rs     # 语义整合 + 记忆检索（待实现）
           embedding_cache.rs # LRU embedding 缓存（待实现）
         decision/            # 决策执行管线（待实现）
           scorer.rs / policy.rs / calibrator.rs / executor.rs
@@ -457,7 +454,130 @@ iris 首次启动时无记忆、无能力、无外部输入——如同一个刚
 - **能力合并**：merge_pack.rs 相似 capability 合并
 - **梦境机制**：RestMode 期间非结构化联想
 
-## 14. 开发门禁
+## 14. 依赖清单
+
+### Workspace 级依赖（Cargo.toml）
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `tokio` | 1.49 | 异步运行时（full features） |
+| `tokio-util` | 0.7 | CancellationToken 等运行时工具 |
+| `sqlx` | 0.8 | PostgreSQL 异步驱动 + 迁移 |
+| `serde` / `serde_json` | 1 | 序列化/反序列化 |
+| `tracing` / `tracing-subscriber` | 0.1 / 0.3 | 结构化日志（JSON 格式） |
+| `uuid` | 1.21 | UUID v4/v5 生成 |
+| `chrono` | 0.4 | 时间处理 |
+| `reqwest` | 0.12 | HTTP 客户端（LLM API 调用） |
+| `thiserror` | 2 | 错误类型派生（库 crate） |
+| `anyhow` | 1 | 错误传播（应用 crate） |
+| `syn` | 2 | Rust 代码解析（codegen 语法校验） |
+
+### Crate 级额外依赖
+
+| Crate | Dependency | Purpose |
+|-------|-----------|---------|
+| `iris-core` | `async-trait` 0.1 | 异步 trait 支持 |
+| `iris-core` | `tempfile` 3.25 | 临时文件（codegen 编译） |
+| `iris-core` | `libc` 0.2 | setrlimit 资源限制 |
+| `iris-cli` | `ratatui` 0.29 | TUI 框架 |
+| `iris-cli` | `crossterm` 0.28 | 终端事件/渲染后端 |
+| `iris-cli` | `unicode-width` 0.2 | CJK 宽字符宽度计算 |
+| `iris-cli` | `tui-markdown` 0.3 | TUI Markdown 渲染 |
+
+## 15. 编码约定
+
+### 错误处理
+
+- **库 crate**（`iris-core`、`iris-llm`）：使用 `thiserror` 定义具体错误类型，避免 `anyhow`
+- **应用 crate**（`iris-cli`）：使用 `anyhow::Result` 简化错误传播
+- 所有 `Result` 必须显式处理，禁止 `.unwrap()`（测试代码除外）
+
+### 异步模式
+
+- 异步 trait 使用 `async-trait` crate（Rust edition 2024 尚未原生稳定异步 trait）
+- 长时间运行的异步任务必须接受 `CancellationToken` 参数
+- 进程内共享状态用 `Arc<T>` 传递，配置用 `Arc<IrisCfg>`
+
+### 测试组织
+
+- 单元测试：写在对应 `.rs` 文件底部的 `#[cfg(test)] mod tests` 中
+- 集成测试：`crates/core/tests/integration.rs`（5 tests）和 `system_integration.rs`（19 tests）
+- 测试命名：`test_<模块>_<行为>_<条件>`，如 `test_gating_urgent_bypass`
+- Mock 策略：不依赖外部服务；LLM 测试使用 `MockProvider`
+
+### 文件与模块
+
+- 每个子目录包含 `mod.rs` 导出公共接口
+- 单文件不超过 800 行；超过时按职责拆分
+- 类型集中定义于 `types.rs`，避免跨模块循环依赖
+
+## 16. 常见陷阱
+
+1. **TUI 日志不可见**：ratatui 使用 raw mode，`println!` 和 `eprintln!` 无效。必须用 `tracing` 写入 `/tmp/iris.log`，通过 `RUST_LOG=info` 控制级别
+2. **数据库迁移**：`sqlx` 迁移在启动时自动执行（`main.rs`）。添加新迁移文件后需重新编译。迁移文件命名：`NNN_描述.sql`，编号递增
+3. **Ephemeral vs Persistent**：无 `DATABASE_URL` 时自动进入 ephemeral 模式——所有持久化功能（情节记忆、capability 状态、identity）静默跳过。开发时如需测试持久化功能，必须配置 PostgreSQL
+4. **LLM Provider 回落**：主模型不可用时不会自动回落到其他 provider。仅在同一 provider 内做重试（连续 3 次失败标记 unavailable，60s 后探测恢复）
+5. **Tool Router 模型**：`CLAUDE_LITE_MODEL` 等 lite 变量未配置时，tool router 回落到主模型，增加 token 消耗
+6. **Capability 子进程**：spawn 的子进程受 `setrlimit` 资源限制。如果子进程崩溃，`process_manager` 会自动重启一次；再次失败则进入 quarantine
+7. **CJK 宽字符**：CLI 输入使用 `unicode-width` 处理宽字符，确保光标定位正确。不可用 raw `BufReader::lines` 替代
+
+## 17. 开发工作流
+
+### 添加新模块
+
+1. 在对应 crate 的子目录下创建 `.rs` 文件
+2. 在对应 `mod.rs` 中添加 `pub mod <name>;`
+3. 在 `types.rs` 中定义新的数据类型（如需要）
+4. 编写单元测试（`#[cfg(test)] mod tests`）
+5. 运行 `cargo clippy` 确认无警告
+6. 更新本文档 §6 文件结构
+
+### 添加新工具/Capability
+
+1. 在 `capability/builtin/` 下创建新文件，实现 `BuiltinTool` trait
+2. 在 `capability/builtin/mod.rs` 中注册
+3. 在 `cognition/tool_call.rs` 的 tool schema 中添加描述
+4. 编写集成测试验证工具调用链路
+5. 更新 §3.8 Capability 文档
+
+### 数据库 Schema 变更
+
+1. 在 `migrations/` 下创建新 SQL 文件（编号递增，如 `006_xxx.sql`）
+2. 编写 UP 迁移（iris 不使用 DOWN 迁移）
+3. 重新编译（`cargo build`）触发 sqlx 编译期检查
+4. 本地测试：确保 `DATABASE_URL` 指向测试数据库
+5. 更新 §7 数据库文档
+
+### 本地调试
+
+```bash
+# 完整日志调试
+RUST_LOG=debug CLAUDE_MODEL=<model> ANTHROPIC_API_KEY=<key> cargo run
+# 监控日志（另一个终端）
+tail -f /tmp/iris.log
+# 仅运行特定模块的测试
+cargo test -p iris-core sensory
+# 查看完整测试输出
+cargo test -- --nocapture
+```
+
+## 18. 故障排查
+
+| 症状 | 排查方向 |
+|------|----------|
+| 启动后无响应 | 检查 `CLAUDE_MODEL` 和对应 API_KEY 是否设置；查看 `/tmp/iris.log` |
+| `[no LLM configured]` 响应 | 主模型未配置或 provider 连续 3 次失败被标记 unavailable |
+| 数据库连接失败 | 确认 `DATABASE_URL` 格式：`postgres://user:pass@host/db`；确认 PostgreSQL 运行中 |
+| TUI 渲染异常 | 确认终端支持 256 色；尝试 `TERM=xterm-256color` |
+| 测试失败（LLM） | 2 个已知失败：`resolve_model_claude_priority` 和 `resolve_base_url_provider_fallback`（provider 环境变量解析优先级边界情况） |
+| Capability 子进程 OOM | 检查 `resource_space/admission.rs` 预算；调整 `RAM_SAFETY_MARGIN` |
+| codegen 编译超时 | 默认 120s；复杂 crate 可能需要调整 `CODEGEN_COMPILE_TIMEOUT` |
+| 内存持续增长 | 检查工作记忆 evict 是否正常；检查 episodic 写入频率 |
+
+## 19. 开发门禁
 
 - 重大架构变更前需更新本文档
 - 对话内容永不记录到日志
+- 提交前运行 `cargo clippy` 确认无警告
+- 新增模块必须包含单元测试
+- 删除/重命名公共 API 时更新所有引用处

@@ -94,6 +94,25 @@ impl App {
         self.cursor = prev;
     }
 
+    fn delete_word_before_cursor(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let before = &self.input[..self.cursor];
+        // Skip trailing whitespace, then skip the word
+        let end = before.len();
+        let after_spaces = before.trim_end().len();
+        let word_start = before[..after_spaces]
+            .rfind(|c: char| c.is_whitespace())
+            .map(|i| {
+                // rfind returns byte index of the whitespace char; skip past it
+                i + before[i..].chars().next().map_or(0, |c| c.len_utf8())
+            })
+            .unwrap_or(0);
+        self.input.drain(word_start..end);
+        self.cursor = word_start;
+    }
+
     fn move_cursor_left(&mut self) {
         if self.cursor == 0 {
             return;
@@ -205,6 +224,9 @@ async fn handle_key(
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             app.should_exit = true;
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
+            app.delete_word_before_cursor();
         }
         (_, KeyCode::Enter) => {
             if let Some(text) = app.submit_input() {
