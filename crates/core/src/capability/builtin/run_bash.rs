@@ -1,5 +1,5 @@
 use crate::types::{CapabilityRequest, CapabilityResponse, Permission};
-use iris_llm::provider::ToolDefinition;
+use llm::provider::ToolDefinition;
 use std::time::Duration;
 
 pub struct RunBash;

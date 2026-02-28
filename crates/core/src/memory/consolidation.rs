@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::memory::episodic;
 use crate::types::Knowledge;
-use iris_llm::provider::{ChatMessage, CompletionRequest, LlmProvider, Role};
+use llm::provider::{ChatMessage, CompletionRequest, LlmProvider, Role};
 
 /// Maximum consecutive failures before skipping a consolidation cycle.
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;

@@ -1,4 +1,4 @@
-use iris_llm::provider::{ChatMessage, CompletionRequest, LlmProvider, Role};
+use llm::provider::{ChatMessage, CompletionRequest, LlmProvider, Role};
 use std::io::Write;
 
 /// Maximum repair iterations before giving up.

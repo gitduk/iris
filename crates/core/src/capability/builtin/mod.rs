@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::types::{CapabilityRequest, CapabilityResponse, Permission};
-use iris_llm::provider::ToolDefinition;
+use llm::provider::ToolDefinition;
 
 /// Project-specific namespace for deterministic UUID v5 generation.
 /// Generated via uuid5(NAMESPACE_URL, "iris-builtin-capability").

@@ -1,5 +1,5 @@
 use crate::types::{ContextEntry, GatedEvent};
-use iris_llm::provider::{ChatMessage, CompletionRequest, LlmError, LlmProvider, Role};
+use llm::provider::{ChatMessage, CompletionRequest, LlmError, LlmProvider, Role};
 
 /// System prompt sections, joined with double newlines to form the final prompt.
 const PROMPT_SECTIONS: &[&str] = &[
@@ -93,7 +93,7 @@ pub async fn generate<P: LlmProvider + ?Sized>(
 mod tests {
     use super::*;
     use crate::types::{RouteTarget, SalienceScore, SensoryEvent};
-    use iris_llm::provider::MockProvider;
+    use llm::provider::MockProvider;
 
     fn make_event(content: &str) -> GatedEvent {
         GatedEvent {

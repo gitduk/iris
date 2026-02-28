@@ -1,6 +1,6 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
 
 /// Origin of a sensory event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +54,13 @@ pub struct SalienceScore {
 }
 
 impl SalienceScore {
-    pub fn compute(novelty: f32, urgency: f32, complexity: f32, task_relevance: f32, urgent_bypass_threshold: f32) -> Self {
+    pub fn compute(
+        novelty: f32,
+        urgency: f32,
+        complexity: f32,
+        task_relevance: f32,
+        urgent_bypass_threshold: f32,
+    ) -> Self {
         let score = novelty * 0.35 + urgency * 0.25 + complexity * 0.25 + task_relevance * 0.15;
         Self {
             score,
@@ -521,38 +527,6 @@ impl FeedbackType {
     }
 }
 
-// ── Runtime status (for TUI status bar) ──────────────────────
-
-/// Snapshot of runtime state, broadcast each tick via watch channel.
-#[derive(Debug, Clone, Copy)]
-pub struct RuntimeStatus {
-    pub tick_count: u64,
-    pub mode: &'static str,
-    pub affect: AffectState,
-    pub pressure: PressureLevel,
-    pub is_fast_only: bool,
-    pub safe_mode_active: bool,
-    pub topic_count: usize,
-    pub context_version: u64,
-    pub rest_active: bool,
-}
-
-impl Default for RuntimeStatus {
-    fn default() -> Self {
-        Self {
-            tick_count: 0,
-            mode: "Idle",
-            affect: AffectState::default(),
-            pressure: PressureLevel::Normal,
-            is_fast_only: false,
-            safe_mode_active: false,
-            topic_count: 0,
-            context_version: 0,
-            rest_active: false,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,7 +646,10 @@ mod tests {
         for nt in &types {
             assert_eq!(NarrativeEventType::parse(nt.as_str()), *nt);
         }
-        assert_eq!(NarrativeEventType::parse("unknown"), NarrativeEventType::Other);
+        assert_eq!(
+            NarrativeEventType::parse("unknown"),
+            NarrativeEventType::Other
+        );
     }
 
     #[test]
@@ -685,7 +662,11 @@ mod tests {
 
     #[test]
     fn affect_state_decay_and_clamp() {
-        let mut a = AffectState { energy: 0.5, valence: 0.5, arousal: 1.0 };
+        let mut a = AffectState {
+            energy: 0.5,
+            valence: 0.5,
+            arousal: 1.0,
+        };
         a.decay_arousal();
         assert!((a.arousal - 0.95).abs() < 0.001);
 
@@ -698,10 +679,18 @@ mod tests {
 
     #[test]
     fn affect_state_should_rest() {
-        let low = AffectState { energy: 0.10, valence: 0.5, arousal: 0.3 };
+        let low = AffectState {
+            energy: 0.10,
+            valence: 0.5,
+            arousal: 0.3,
+        };
         assert!(low.should_rest());
 
-        let ok = AffectState { energy: 0.20, valence: 0.5, arousal: 0.3 };
+        let ok = AffectState {
+            energy: 0.20,
+            valence: 0.5,
+            arousal: 0.3,
+        };
         assert!(!ok.should_rest());
     }
 

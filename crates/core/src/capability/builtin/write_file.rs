@@ -1,5 +1,5 @@
 use crate::types::{CapabilityRequest, CapabilityResponse, Permission};
-use iris_llm::provider::ToolDefinition;
+use llm::provider::ToolDefinition;
 
 pub struct WriteFile;
 

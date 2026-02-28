@@ -1,6 +1,6 @@
 use crate::config::IrisCfg;
 use crate::types::{ActionPlan, DeliberateDecision, GatedEvent};
-use iris_llm::provider::{
+use llm::provider::{
     ChatMessage, CompletionRequest, LlmError, LlmProvider, Role,
 };
 use std::sync::Arc;
@@ -106,7 +106,7 @@ fn build_request(event: &GatedEvent, self_context: &str) -> CompletionRequest {
 mod tests {
     use super::*;
     use crate::types::{RouteTarget, SalienceScore, SensoryEvent};
-    use iris_llm::provider::MockProvider;
+    use llm::provider::MockProvider;
 
     fn default_cfg() -> IrisCfg {
         IrisCfg::default()

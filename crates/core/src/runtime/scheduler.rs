@@ -33,9 +33,9 @@ use crate::sensory::gating;
 use crate::thalamus::router;
 use crate::types::{
     ContextEntry, Episode, EventSource, FeedbackType, GapDescriptor, GapType, GatedEvent,
-    NarrativeEventType, RuntimeStatus, SensoryEvent,
+    NarrativeEventType, SensoryEvent,
 };
-use iris_llm::provider::LlmProvider;
+use llm::provider::LlmProvider;
 
 /// Core runtime that drives the iris tick loop.
 pub struct Runtime {
@@ -81,8 +81,6 @@ pub struct Runtime {
     rest_cycle: RestCycle,
     /// Context version — increments on external input, detects stale reasoning.
     context_version: ContextVersion,
-    /// Status watch channel — broadcasts runtime snapshot each tick for TUI.
-    status_tx: tokio::sync::watch::Sender<RuntimeStatus>,
     /// Capability subprocess manager.
     process_manager: ProcessManager,
     /// Built-in capabilities (read_file, write_file, run_bash).
@@ -90,21 +88,15 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Create a new Runtime. Returns (Runtime, event_sender, output_receiver, status_receiver).
+    /// Create a new Runtime. Returns (Runtime, event_sender, output_receiver).
     /// Send `SensoryEvent`s into the returned sender to feed the tick loop.
     /// Consume `OutputMessage`s from the returned receiver to get iris responses.
-    /// Watch `RuntimeStatus` from the returned receiver for TUI status bar.
     pub fn new(
         cfg: Arc<IrisCfg>,
         pool: Option<sqlx::PgPool>,
         llm: Option<Arc<dyn LlmProvider>>,
         lite_llm: Option<Arc<dyn LlmProvider>>,
-    ) -> (
-        Self,
-        mpsc::Sender<SensoryEvent>,
-        OutputReceiver,
-        tokio::sync::watch::Receiver<RuntimeStatus>,
-    ) {
+    ) -> (Self, mpsc::Sender<SensoryEvent>, OutputReceiver) {
         let shutdown = ShutdownGuard::new();
         let shutdown_token = shutdown.token();
         let working_memory_cap = cfg.working_memory_cap;
@@ -118,7 +110,6 @@ impl Runtime {
         // affect_rx intentionally dropped — Runtime reads affect via affect.current() directly
         let (affect, _) = AffectActor::new();
         let (budget_tx, _budget_rx) = budget::watch_channel();
-        let (status_tx, status_rx) = tokio::sync::watch::channel(RuntimeStatus::default());
         let runtime = Self {
             cfg,
             shutdown,
@@ -143,11 +134,10 @@ impl Runtime {
             budget_tx,
             rest_cycle: RestCycle::new(),
             context_version: ContextVersion::new(),
-            status_tx,
             process_manager: ProcessManager::new(shutdown_token),
             builtin_registry: BuiltinRegistry::new(),
         };
-        (runtime, tx, output_rx, status_rx)
+        (runtime, tx, output_rx)
     }
 
     /// Start the signal listener and enter the main tick loop.
@@ -478,24 +468,6 @@ impl Runtime {
                 }
             }
         }
-
-        // Broadcast runtime status snapshot for TUI
-        let mode_str = match self.mode {
-            TickMode::Normal => "Normal",
-            TickMode::Idle => "Idle",
-            TickMode::Rest => "Rest",
-        };
-        let _ = self.status_tx.send(RuntimeStatus {
-            tick_count: self.tick_count,
-            mode: mode_str,
-            affect: self.affect.current(),
-            pressure: pressure_level,
-            is_fast_only: self.pressure.is_fast_only(),
-            safe_mode_active: self.safe_mode.is_active(),
-            topic_count: self.topics.active_count(),
-            context_version: self.context_version.current(),
-            rest_active: self.rest_cycle.is_active(),
-        });
     }
 
     /// Process a single event through the fast/slow cognitive pipeline.
@@ -884,9 +856,7 @@ impl Runtime {
                     }
                 }
                 ToolPlan::DirectResponse => {
-                    match response::generate(event, llm.as_ref(), &context, self_context)
-                        .await
-                    {
+                    match response::generate(event, llm.as_ref(), &context, self_context).await {
                         Ok(response) => {
                             tracing::info!(
                                 response_len = response.len(),
@@ -962,8 +932,7 @@ impl Runtime {
             let mut context: Vec<&ContextEntry> = working.to_vec();
             context.push(&tool_entry);
 
-            let llm_result =
-                response::generate(event, llm.as_ref(), &context, self_context).await;
+            let llm_result = response::generate(event, llm.as_ref(), &context, self_context).await;
 
             // Persist normalized observation to working memory so it survives even if LLM summary is poor
             // (must happen after generate() to avoid borrow conflict on working_memory)

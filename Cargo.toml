@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/cli", "crates/core", "crates/llm"]
+members = ["crates/core", "crates/llm"]
 
 [workspace.package]
 version = "0.1.0"
@@ -37,6 +37,6 @@ anyhow = "1"
 # code analysis
 syn = { version = "2", features = ["full", "parsing"] }
 
-# iris workspace crates
-iris-core = { path = "crates/core" }
-iris-llm = { path = "crates/llm" }
+# workspace crates
+core = { path = "crates/core" }
+llm = { path = "crates/llm" }

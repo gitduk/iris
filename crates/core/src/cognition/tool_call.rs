@@ -1,6 +1,6 @@
 use crate::capability::builtin::BuiltinRegistry;
 use crate::types::{CapabilityRequest, CapabilityResponse};
-use iris_llm::provider::{
+use llm::provider::{
     ChatMessage, CompletionRequest, ContentBlock, LlmError, LlmProvider, Role, StopReason,
     ToolDefinition,
 };
@@ -425,7 +425,7 @@ pub async fn run_agentic_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iris_llm::provider::MockProvider;
+    use llm::provider::MockProvider;
 
     #[tokio::test]
     async fn router_returns_valid_tool_decision() {
@@ -555,7 +555,7 @@ mod tests {
     #[tokio::test]
     async fn agentic_loop_with_tool_use() {
         // First call returns ToolUse, second call returns EndTurn
-        use iris_llm::provider::{CompletionResponse, LlmError};
+        use llm::provider::{CompletionResponse, LlmError};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct TwoStepProvider {

@@ -2,7 +2,7 @@ use tokio::signal;
 use tokio_util::sync::CancellationToken;
 
 /// Manages graceful shutdown via CancellationToken.
-/// Listens for SIGTERM/SIGINT and cancels the token.
+/// Listens for SIGTERM and cancels the token.
 #[derive(Debug)]
 pub struct ShutdownGuard {
     token: CancellationToken,
@@ -24,23 +24,23 @@ impl ShutdownGuard {
     pub fn spawn_signal_listener(&self) {
         let token = self.token.clone();
         tokio::spawn(async move {
-            let ctrl_c = signal::ctrl_c();
-            match signal::unix::signal(signal::unix::SignalKind::terminate()) {
-                Ok(mut sigterm) => {
-                    tokio::select! {
-                        _ = ctrl_c => {
-                            tracing::info!("received SIGINT, initiating shutdown");
-                        },
-                        _ = sigterm.recv() => {
-                            tracing::info!("received SIGTERM, initiating shutdown");
-                        },
+            #[cfg(unix)]
+            {
+                match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+                    Ok(mut sigterm) => {
+                        let _ = sigterm.recv().await;
+                        tracing::info!("received SIGTERM, initiating shutdown");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to register SIGTERM handler");
+                        return;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to register SIGTERM handler, listening for SIGINT only");
-                    let _ = ctrl_c.await;
-                    tracing::info!("received SIGINT, initiating shutdown");
-                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = signal::ctrl_c().await;
+                tracing::info!("received Ctrl+C, initiating shutdown");
             }
             token.cancel();
         });

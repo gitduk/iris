@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::types::{CodegenHistory, GapDescriptor};
-use iris_llm::provider::LlmProvider;
+use llm::provider::LlmProvider;
 
 use super::{crate_permit, db, prompt, repair_loop};
 
