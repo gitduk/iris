@@ -9,10 +9,8 @@ use rustyline::error::ReadlineError;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-type DynError = Box<dyn std::error::Error + Send + Sync>;
-
 #[tokio::main]
-async fn main() -> Result<(), DynError> {
+async fn main() -> anyhow::Result<()> {
     const DB_CONNECT_TIMEOUT_SECS: u64 = 3;
 
     let mut startup_notice: Option<String> = None;
@@ -95,7 +93,7 @@ async fn run_repl(
     mut output_rx: OutputReceiver,
     token: CancellationToken,
     startup_notice: Option<String>,
-) -> Result<(), DynError> {
+) -> anyhow::Result<()> {
     const SPINNER: [&str; 4] = ["-", "\\", "|", "/"];
 
     // Clear screen so cargo build output is not visible.
@@ -189,13 +187,13 @@ async fn run_repl(
     Ok(())
 }
 
-fn draw_thinking_frame(frame: &str) -> Result<(), DynError> {
+fn draw_thinking_frame(frame: &str) -> anyhow::Result<()> {
     print!("\rthinking... {frame}");
     io::stdout().flush()?;
     Ok(())
 }
 
-fn clear_current_line() -> Result<(), DynError> {
+fn clear_current_line() -> anyhow::Result<()> {
     print!("\r\x1b[2K");
     io::stdout().flush()?;
     Ok(())
