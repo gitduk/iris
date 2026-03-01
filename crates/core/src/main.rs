@@ -9,49 +9,34 @@ use rustyline::error::ReadlineError;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+const DB_CONNECT_TIMEOUT_SECS: u64 = 3;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    const DB_CONNECT_TIMEOUT_SECS: u64 = 3;
-
     let mut startup_notice: Option<String> = None;
-    let pool = match std::env::var("DATABASE_URL") {
-        Ok(url) => {
-            let connect_result = tokio::time::timeout(
-                Duration::from_secs(DB_CONNECT_TIMEOUT_SECS),
-                sqlx::postgres::PgPoolOptions::new()
-                    .max_connections(8)
-                    .connect(&url),
-            )
-            .await;
-
-            match connect_result {
-                Ok(Ok(pool)) => match sqlx::migrate!("../../migrations").run(&pool).await {
-                    Ok(()) => Some(pool),
-                    Err(_) => {
-                        startup_notice = Some(
-                            "提示：数据库迁移失败，已自动降级为临时模式（ephemeral）。本次会话数据不会持久化。"
-                                .to_string(),
-                        );
-                        None
-                    }
-                },
-                Ok(Err(_)) => {
-                    startup_notice = Some(
-                        "提示：无法连接 DATABASE_URL，已自动降级为临时模式（ephemeral）。本次会话数据不会持久化。"
-                            .to_string(),
-                    );
-                    None
-                }
-                Err(_) => {
-                    startup_notice = Some(format!(
-                        "提示：连接数据库超时（{}s），已自动降级为临时模式（ephemeral）。本次会话数据不会持久化。",
-                        DB_CONNECT_TIMEOUT_SECS
-                    ));
-                    None
-                }
-            }
+    let pool = if let Ok(url) = std::env::var("DATABASE_URL") {
+        let mut fallback = |reason: String| {
+            startup_notice = Some(format!(
+                "提示：{reason}，已自动降级为临时模式（ephemeral）。本次会话数据不会持久化。"
+            ));
+        };
+        match tokio::time::timeout(
+            Duration::from_secs(DB_CONNECT_TIMEOUT_SECS),
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(8)
+                .connect(&url),
+        )
+        .await
+        {
+            Ok(Ok(pool)) => match sqlx::migrate!("../../migrations").run(&pool).await {
+                Ok(()) => Some(pool),
+                Err(_) => { fallback("数据库迁移失败".into()); None }
+            },
+            Ok(Err(_)) => { fallback("无法连接 DATABASE_URL".into()); None }
+            Err(_) => { fallback(format!("连接数据库超时（{DB_CONNECT_TIMEOUT_SECS}s）")); None }
         }
-        Err(_) => None,
+    } else {
+        None
     };
 
     let cfg = if let Some(ref pool) = pool {
